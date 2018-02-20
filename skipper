@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+
+# Skipper
+# A WordPress Site Setup Script for Laravel Valet
+# Copyright (c) 2018 https://josephfus.co
+
+VERSION="0.1.1"
+
+set -o nounset
+set -o errexit
+set -o pipefail
+shopt -s extglob
+
+# Default options.
+NAME=""
+TITLE=""
+ADMIN_USER="admin"
+ADMIN_PASSWORD="password"
+ADMIN_EMAIL=`git config user.email`
+DIVI=0
+DRY_RUN=0
+
+_NAMES=()
+_ET_USERNAME=""
+_ET_API_KEY=""
+
+# Create skipper config directory.
+if [ ! -d "${HOME}/.skipper" ]; then
+	mkdir "${HOME}/.skipper"
+fi
+
+# Setup colors if we have tput.
+if [[ ! -z $(which tput 2>/dev/null) ]]; then
+	normal=$(tput sgr0)
+	bold=$(tput bold)
+	red=$(tput setaf 1)
+	green=$(tput setaf 2)
+	yellow=$(tput setaf 3)
+	magenta=$(tput setaf 5)
+	cyan=$(tput setaf 6)
+fi
+
+# Print error notification & suggest help command.
+_error() {
+	echo -e >&2 "${red}${bold}Error: ${normal} ${1}"
+	echo -e >&2 "See 'skipper --help'."
+	exit 1
+}
+
+# Print script version.
+_print_version() {
+	echo "v${VERSION}"
+}
+
+# Print script usage & options.
+_print_usage() {
+	cat <<HELP
+
+${cyan}${bold}USAGE:${normal}
+
+  skipper [options] <name>
+
+${cyan}${bold}OPTIONS:${normal}
+
+  --admin_user=<username>         WordPress admin username
+  --admin_password=<password>     WordPress admin password
+  --admin_email=<email>           WordPress admin email
+  --title=<site-title>            WordPress site title
+  --divi                          Install & activate Divi theme (requires Elegant Themes API key)
+  --dry-run                       Test command before creating a new site
+
+  -h | --help                     Show skipper help & usage
+  -v | --version                  Show skipper version
+
+HELP
+}
+
+# Check if no argument(s).
+if [[ $# -eq 0 ]] ; then
+	_error "No arguments found."
+fi
+
+# Check for script dependencies.
+_check_requirements() {
+
+	# wp-cli.
+	command -v wp >/dev/null 2>&1 || {
+		echo -e >&2 "${red}${bold}Error:${normal} wp-cli is required but not installed.\
+		\nVisit ${cyan}http://wp-cli.org/${normal} for instructions.";
+		exit 1;
+	}
+
+	# wp-cli package - aaemnnosttv/wp-cli-login-command.
+	if [ ! -d "${HOME}/.wp-cli/packages/vendor/aaemnnosttv/wp-cli-login-command" ]; then
+		echo -e >&2 "${red}${bold}Error:${normal} the wp-cli package ${cyan}aaemnnosttv/wp-cli-login-command${normal} is required.\
+		\nInstall this package with: ${yellow}wp package install aaemnnosttv/wp-cli-login-command${normal}";
+		exit 1;
+	fi
+
+}
+_check_requirements
+
+# Get value from non-minified json file.
+_read_json() {
+	UNAMESTR=`uname`
+	if [[ "$UNAMESTR" == 'Linux' ]]; then
+		SED_EXTENDED='-r'
+	elif [[ "$UNAMESTR" == 'Darwin' ]]; then
+		SED_EXTENDED='-E'
+	fi;
+
+	VALUE=`grep -m 1 "\"${2}\"" ${1} | sed ${SED_EXTENDED} 's/^ *//;s/.*: *"//;s/",?//'`
+	if [ ! "$VALUE" ]; then
+		echo "Error: Cannot find \"${2}\" in ${1}" >&2;
+		exit 1;
+	else
+		echo $VALUE ;
+	fi;
+}
+
+_get_value() {
+	temp=`echo $1 | sed 's/\\\\\//\//g' | sed 's/[{}]//g' | awk -v k="text" '{n=split($0,a,","); for (i=1; i<=n; i++) print a[i]}' | sed 's/\"\:\"/\|/g' | sed 's/[\,]/ /g' | sed 's/\"//g' | grep -w $prop`
+	echo ${temp##*|}
+}
+
+# Make lowercase and turn spaces to dashes.
+_sanitize() {
+	_LOWERCASE="${1,,}"
+	echo ${_LOWERCASE// /-}
+}
+
+# Handle Divi credentials.
+_divi_config() {
+
+	# Create divi config to store username & API key if one doesn't exists.
+	if [ ! -f "${HOME}/.skipper/et.json" ]; then
+		echo "Looks like this is your first time installing Divi with Skipper!"
+		echo "Please enter your ${magenta}Elegant Themes${normal} username and API key."
+		echo "This will be saved to ${green}~/.skipper/et.json${normal}"
+
+		# Get user info.
+		read -p '${yellow}Username: ${normal}' _ET_USERNAME
+		read -p '${yellow}API Key: ${normal}' _ET_API_KEY
+
+		# Create config file.
+		echo -en "{\n\t\"username\":\"${_ET_USERNAME}\",\n\t\"api_key\":\"${_ET_API_KEY}\"\n}" > ${HOME}/.skipper/et.json
+
+		# Alert user to config creation.
+		echo -e "\n${magenta}Elegant Themes${normal} config file created!"
+		echo -e "To update your username or API Key, edit ${green}~/.skipper/et.json${normal}.\n"
+	fi
+
+	# Get ET credentials.
+	_ET_API_KEY=`_read_json ${HOME}/.skipper/et.json api_key`
+	_ET_USERNAME=`_read_json ${HOME}/.skipper/et.json username`
+}
+
+# Parse script arguments.
+# https://stackoverflow.com/questions/192249/how-do-i-parse-command-line-arguments-in-bash
+for i in "$@"
+do
+case $i in
+	-h|--help)
+		_print_usage
+		exit 0
+		;;
+	-v|--version)
+		_print_version
+		exit 0
+		;;
+	--admin_user=*|--admin_username=*)
+		ADMIN_USER="${i#*=}"
+		shift # Past argument=value.
+		;;
+	--admin_password=*|--admin_pass=*)
+		ADMIN_PASSWORD="${i#*=}"
+		shift # Past argument=value.
+		;;
+	--admin_email=*)
+		ADMIN_EMAIL="${i#*=}"
+		shift # Past argument=value.
+		;;
+	--title=*)
+		TITLE="${i#*=}"
+		shift # Past argument=value.
+		;;
+	--divi)
+		DIVI=1
+		_divi_config
+		shift # Past argument with no value.
+		;;
+	--dry-run)
+		DRY_RUN=1
+		shift # Past argument with no value.
+		;;
+	-*|--*) # Check for unrecognized options.
+		_error "Unrecognized option found."
+		;;
+	!(-*|--*)) # Check for operands
+		_NAMES+=("$i")
+		shift
+		;;
+esac
+done
+
+# Check if no argument.
+if [[ ${#_NAMES[@]} -gt 1 ]] ; then
+	_error "${#_NAMES[@]} operands found. Only accepts 1."
+fi
+
+_create_site() {
+
+	if [[ DRY_RUN -eq 1 ]]; then
+			echo "Admin User     = ${ADMIN_USER}"
+			echo "Admin Password = ${ADMIN_PASSWORD}"
+			echo "Admin Email    = ${ADMIN_EMAIL}"
+			echo "Title          = ${TITLE}"
+			echo "Divi           = ${DIVI}"
+			exit 0
+	fi;
+
+	echo 'Creating your new site...'
+
+	_SITE_NAME="$(_sanitize "${_NAMES[0]}")"
+	_VALET_DIR="${HOME}/Sites"
+	_VALET_DOMAIN=`_read_json ${HOME}/.valet/config.json domain`
+
+	# Create directory and go there.
+	mkdir "${_VALET_DIR}/${_SITE_NAME}" && cd "${_VALET_DIR}/${_SITE_NAME}"
+
+	# Download WP, create the wp-config file, create database, & go through WP installer.
+	wp core download
+	wp core config \
+		--dbname=valetwp_${_SITE_NAME} \
+		--dbuser=root
+	wp db create
+	wp core install \
+		--url=${_SITE_NAME}.${_VALET_DOMAIN} \
+		--title=${_SITE_NAME} \
+		--admin_user=${ADMIN_USER} \
+		--admin_password=${ADMIN_PASSWORD} \
+		--admin_email=${ADMIN_EMAIL} \
+		--skip-email
+
+	# Delete hello dolly & akismet.
+	wp plugin delete hello
+	wp plugin delete akismet
+
+	# Remove older twenty* themes.
+	wp theme delete twentysixteen
+	wp theme delete twentyfifteen
+
+	# Create our menu and assign default posts.
+	wp menu create "Primary"
+	wp menu item add-post primary 2
+	wp menu item add-post primary 1
+
+	# Assign menu location (based on twentyseventeen).
+	wp menu location assign primary top
+
+	# If Divi, do divi stuff.
+	if [[ $DIVI -eq 1 ]] ; then
+		wp theme install "https://www.elegantthemes.com/api/api_downloads.php?api_update=1&theme=Divi&api_key=$_ET_API_KEY&username=$_ET_USERNAME" --activate
+		wp plugin install accessible-divi --activate
+
+		# Assign new menu to Divi top navigation area.
+		wp menu location assign primary primary-menu
+	fi
+
+	# Install utility plugins.
+	wp plugin install https://github.com/josephfusco/wp-self-destruct/archive/master.zip --activate
+
+	# Change default post 'Hello World' to be page named 'Blog' & assign as posts page.
+	wp post update 1 --post_type=page --post_title='Blog' --post_status='publish'
+	wp option update page_for_posts 1
+
+	# Change default page 'Sample Page' to be 'Home' & assign as front page.
+	wp post update 2 --post_title='Home'
+	wp option update show_on_front page
+	wp option update page_on_front 2
+
+	# Disable all comments.
+	wp plugin install disable-comments --activate
+	wp option update disable_comments_options --format=json '{"disabled_post_types":["post","page","attachment"],"remove_everywhere":true,"permanent":false,"extra_post_types":false,"db_version":6}'
+
+	# Discourage search engines.
+	wp option update blog_public 0
+
+	# Set pretty urls.
+	wp rewrite structure '/%postname%/' --hard
+	wp rewrite flush --hard
+
+	echo 'Logging in...'
+
+	# Login as admin user and open site in default browser.
+	wp login install --activate 2>&1 >/dev/null
+	wp login as $ADMIN_USER --launch 2>&1 >/dev/null
+	wp plugin deactivate wp-cli-login-server --uninstall 2>&1 >/dev/null
+
+	echo 'Finished!'
+}
+_create_site
+shopt -u extglob
