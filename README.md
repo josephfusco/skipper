@@ -5,12 +5,6 @@
 
 Skipper is a WordPress site setup script for [Laravel Valet](https://github.com/laravel/valet).
 
-## Installation
-
-```
-brew install josephfusco/skipper/skipper
-```
-
 ## Usage
 
 For usage information:
